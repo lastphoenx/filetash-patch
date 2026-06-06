@@ -14,6 +14,7 @@ Läuft produktiv seit April 2026. **Benutzung auf eigenes Risiko.**
 - **Ordner-Picker Modal** – mit Breadcrumb-Navigation, responsiv
 - **Tastaturkürzel** – F2 (Rename), Del (Delete), M (Move)
 - **Statusmeldung** – unterscheidet "verschoben" vs. "umbenannt"
+- **Delete-Bestätigung** – Eingabefeld erwartet `remove` statt Dateiname
 - **Modal-Breite** – erhöht auf 600px
 
 ---
@@ -71,6 +72,12 @@ src/
 ## Upstream-Status
 
 Issue [#801](https://github.com/mickael-kerjean/filestash/issues/801) seit 2022 offen. Dieser Patch ist eine **Community-Lösung**, nicht offiziell supported.
+
+---
+
+## Verwandte Dokumentation
+
+- [filestash-collabora-wopi.md](filestash-collabora-wopi.md) – Collabora Online (WOPI) Integration: Infrastruktur, Filestash-Admin-Einstellungen, nginx-Config, Troubleshooting und PDF-Viewer-Option
 
 ---
 
