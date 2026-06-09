@@ -1,32 +1,44 @@
 package plg_backend_pcloud
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	. "github.com/mickael-kerjean/filestash/server/common"
 )
 
-// version: 1.0.2
+// version: 1.1.4
 func init() {
 	Backend.Register("pcloud", PCloud{})
 }
 
 type PCloud struct {
-	ClientId       string
-	ClientSecret   string
-	Hostname       string
-	Bearer         string
-	ApiHost        string
-	RootFolderid   string
-	RootPath       string
+	ClientId     string
+	ClientSecret string
+	Hostname     string
+	Bearer       string
+	ApiHost      string
+	RootFolderid string
+	RootPath     string
+}
+
+type pcloudMeta struct {
+	Name     string
+	IsFolder bool
+	Size     int64
+	Modified string
+	FileId   int64
+	FolderId int64
+	Path     string
 }
 
 func (p PCloud) getClientId() string {
@@ -71,8 +83,9 @@ func (p PCloud) Init(params map[string]string, app *App) (IBackend, error) {
 	}
 	backend.RootFolderid = params["root_folderid"]
 	backend.RootPath = params["root_path"]
-	Log.Warning("pcloud Init: clientId_len=%d secret_len=%d hostname=%s apiHost=%s bearer_len=%d",
-		len(backend.ClientId), len(backend.ClientSecret), backend.Hostname, backend.ApiHost, len(backend.Bearer))
+	Log.Warning("pcloud Init: clientId_len=%d secret_len=%d hostname=%s apiHost=%s bearer_len=%d rootPath=%s rootFolderid=%s",
+		len(backend.ClientId), len(backend.ClientSecret), backend.Hostname, backend.ApiHost, len(backend.Bearer),
+		backend.RootPath, backend.RootFolderid)
 	if backend.ClientId == "" {
 		return backend, NewError("Missing ClientID: Contact your admin", 502)
 	}
@@ -121,7 +134,6 @@ func (p PCloud) OAuthURL() string {
 }
 
 func (p PCloud) OAuthToken(ctx *map[string]interface{}) error {
-	// Log everything in ctx so we can see what Filestash passes in
 	keys := make([]string, 0)
 	for k := range *ctx {
 		keys = append(keys, k)
@@ -170,7 +182,9 @@ func (p PCloud) OAuthToken(ctx *map[string]interface{}) error {
 	r, err := tryHost("eapi.pcloud.com")
 	if err != nil || r.Result != 0 {
 		Log.Warning("pcloud OAuthToken: eapi failed (err=%v result=%d), trying api.pcloud.com", err, func() int {
-			if r != nil { return r.Result }
+			if r != nil {
+				return r.Result
+			}
 			return -1
 		}())
 		r, err = tryHost("api.pcloud.com")
@@ -201,21 +215,182 @@ func (p PCloud) OAuthToken(ctx *map[string]interface{}) error {
 	return nil
 }
 
+func normRemotePath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "/"
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	for strings.Contains(path, "//") {
+		path = strings.ReplaceAll(path, "//", "/")
+	}
+	if len(path) > 1 && strings.HasSuffix(path, "/") {
+		path = strings.TrimSuffix(path, "/")
+	}
+	return path
+}
+
+func pathDir(p string) string {
+	p = strings.TrimSuffix(normRemotePath(p), "/")
+	if p == "" || p == "/" {
+		return "/"
+	}
+	i := strings.LastIndex(p, "/")
+	if i <= 0 {
+		return "/"
+	}
+	return p[:i]
+}
+
+func pathBase(p string) string {
+	p = strings.TrimSuffix(normRemotePath(p), "/")
+	if p == "" || p == "/" {
+		return ""
+	}
+	i := strings.LastIndex(p, "/")
+	return p[i+1:]
+}
+
+func parseBoolish(v interface{}) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case float64:
+		return x != 0
+	case int64:
+		return x != 0
+	case string:
+		return x == "true" || x == "1"
+	}
+	return false
+}
+
+func parseInt64ish(v interface{}) int64 {
+	switch x := v.(type) {
+	case float64:
+		return int64(x)
+	case int64:
+		return x
+	case int:
+		return int64(x)
+	case string:
+		n, _ := strconv.ParseInt(x, 10, 64)
+		return n
+	}
+	return 0
+}
+
+func parseModifiedUnix(modified string) int64 {
+	t, err := time.Parse("Mon, 02 Jan 2006 15:04:05 +0000", modified)
+	if err != nil {
+		return 0
+	}
+	return t.Unix()
+}
+
+func isFolderItem(item map[string]interface{}) bool {
+	if parseBoolish(item["isfolder"]) {
+		return true
+	}
+	icon, _ := item["icon"].(string)
+	return icon == "folder"
+}
+
+func metaFromMap(item map[string]interface{}, parentPath string) *pcloudMeta {
+	name, _ := item["name"].(string)
+	isFolder := isFolderItem(item)
+	modified, _ := item["modified"].(string)
+	itemPath, _ := item["path"].(string)
+	if itemPath == "" && name != "" {
+		if parentPath == "/" {
+			itemPath = "/" + name
+		} else {
+			itemPath = parentPath + "/" + name
+		}
+	}
+	return &pcloudMeta{
+		Name:     name,
+		IsFolder: isFolder,
+		Size:     parseInt64ish(item["size"]),
+		Modified: modified,
+		FileId:   parseInt64ish(item["fileid"]),
+		FolderId: parseInt64ish(item["folderid"]),
+		Path:     normRemotePath(itemPath),
+	}
+}
+
+func fileFromMap(item map[string]interface{}, parentPath string) File {
+	meta := metaFromMap(item, parentPath)
+	fPath := meta.Path
+	if meta.IsFolder && fPath != "" && !strings.HasSuffix(fPath, "/") {
+		fPath += "/"
+	}
+	fType := "file"
+	if meta.IsFolder {
+		fType = "directory"
+	}
+	return File{
+		FName: meta.Name,
+		FType: fType,
+		FTime: parseModifiedUnix(meta.Modified),
+		FSize: meta.Size,
+		FPath: fPath,
+	}
+}
+
+func parseListfolderBody(rawBody []byte) ([]map[string]interface{}, int, string, error) {
+	var r struct {
+		Result   int                    `json:"result"`
+		Error    string                 `json:"error"`
+		Metadata map[string]interface{} `json:"metadata"`
+	}
+	if err := json.Unmarshal(rawBody, &r); err != nil {
+		return nil, 0, "", err
+	}
+	if r.Result != 0 {
+		return nil, r.Result, r.Error, NewError(r.Error, 400)
+	}
+	contents := make([]map[string]interface{}, 0)
+	rawContents, ok := r.Metadata["contents"].([]interface{})
+	if !ok {
+		return contents, 0, "", nil
+	}
+	for _, entry := range rawContents {
+		if item, ok := entry.(map[string]interface{}); ok {
+			contents = append(contents, item)
+		}
+	}
+	return contents, 0, "", nil
+}
+
+func (p PCloud) pcloudPath(path string) string {
+	return normRemotePath(path)
+}
+
 func (p PCloud) apiURL(method string) string {
 	return "https://" + p.ApiHost + "/" + method
+}
+
+func encodePathParam(key, value string) string {
+	return key + "=" + strings.ReplaceAll(url.QueryEscape(value), "%2F", "/")
 }
 
 func (p PCloud) get(method string, params map[string]string) (*http.Response, error) {
 	q := url.Values{}
 	q.Set("access_token", p.Bearer)
+	pathParams := make(map[string]string)
 	for k, v := range params {
-		if k != "path" {
+		if k == "path" || k == "topath" {
+			pathParams[k] = v
+		} else {
 			q.Set(k, v)
 		}
 	}
 	rawURL := p.apiURL(method) + "?" + q.Encode()
-	if pathVal, ok := params["path"]; ok {
-		rawURL += "&path=" + strings.ReplaceAll(url.QueryEscape(pathVal), "%2F", "/")
+	for k, v := range pathParams {
+		rawURL += "&" + encodePathParam(k, v)
 	}
 	req, err := http.NewRequest("GET", rawURL, nil)
 	if err != nil {
@@ -224,66 +399,193 @@ func (p PCloud) get(method string, params map[string]string) (*http.Response, er
 	return HTTPClient().Do(req)
 }
 
-func (p PCloud) Ls(path string) ([]os.FileInfo, error) {
-	Log.Warning("pcloud Ls: path=%s apiHost=%s bearer_len=%d", path, p.ApiHost, len(p.Bearer))
-	if uiRes, uiErr := p.get("userinfo", map[string]string{}); uiErr == nil {
-		uiBody, _ := io.ReadAll(uiRes.Body)
-		uiRes.Body.Close()
-		Log.Warning("pcloud userinfo: %s", strings.ReplaceAll(string(uiBody), "\n", ""))
+func (p PCloud) lsParams(path string) map[string]string {
+	if path == "/" || path == "" {
+		if p.RootFolderid != "" {
+			return map[string]string{"folderid": p.RootFolderid}
+		}
+		return map[string]string{"folderid": "0"}
 	}
-	files := make([]os.FileInfo, 0)
-	lsParams := map[string]string{"path": p.pcloudPath(path)}
-	if path == "/" {
-		lsParams = map[string]string{"folderid": "0"}
+	remote := normRemotePath(strings.TrimSuffix(p.pcloudPath(path), "/"))
+	if strings.HasSuffix(strings.TrimSpace(path), "/") {
+		if meta, err := p.statRemote(remote); err == nil && meta.IsFolder && meta.FolderId > 0 {
+			return map[string]string{"folderid": strconv.FormatInt(meta.FolderId, 10)}
+		}
 	}
-	res, err := p.get("listfolder", lsParams)
+	return map[string]string{"path": remote}
+}
+
+func (p PCloud) statRemote(remotePath string) (*pcloudMeta, error) {
+	res, err := p.get("stat", map[string]string{"path": remotePath})
 	if err != nil {
-		Log.Warning("pcloud Ls: get error=%v", err)
 		return nil, err
 	}
-	rawBody, _ := io.ReadAll(res.Body)
-	res.Body.Close()
-	Log.Warning("pcloud Ls raw: %.800s", strings.ReplaceAll(string(rawBody), "\n", ""))
-	var r struct {
-		Result   int    `json:"result"`
-		Error    string `json:"error"`
-		Metadata struct {
-			Contents []struct {
-				Name     string `json:"name"`
-				IsFolder bool   `json:"isfolder"`
-				Size     int64  `json:"size"`
-				Modified string `json:"modified"`
-			} `json:"contents"`
-		} `json:"metadata"`
+	defer res.Body.Close()
+	rawBody, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil, err
 	}
-	json.Unmarshal(rawBody, &r)
-	Log.Warning("pcloud Ls: result=%d error=%s items=%d", r.Result, r.Error, len(r.Metadata.Contents))
+	var r struct {
+		Result   int                    `json:"result"`
+		Error    string                 `json:"error"`
+		Metadata map[string]interface{} `json:"metadata"`
+	}
+	if err := json.Unmarshal(rawBody, &r); err != nil {
+		return nil, err
+	}
 	if r.Result != 0 {
 		return nil, NewError(r.Error, 400)
 	}
-	for _, obj := range r.Metadata.Contents {
-		t, _ := time.Parse("Mon, 02 Jan 2006 15:04:05 +0000", obj.Modified)
-		files = append(files, File{
-			FName: obj.Name,
-			FType: func(isFolder bool) string {
-				if isFolder {
-					return "directory"
-				}
-				return "file"
-			}(obj.IsFolder),
-			FTime: t.UnixNano() / 1000,
-			FSize: obj.Size,
-		})
+	meta := metaFromMap(r.Metadata, pathDir(remotePath))
+	if meta.Path == "" {
+		meta.Path = remotePath
+	}
+	return meta, nil
+}
+
+func (p PCloud) resolveEntry(path string) (*pcloudMeta, error) {
+	wantFolder := strings.HasSuffix(strings.TrimSpace(path), "/")
+	remotePath := normRemotePath(strings.TrimSuffix(p.pcloudPath(path), "/"))
+	parent := pathDir(remotePath)
+	name := pathBase(remotePath)
+	if name == "" {
+		return nil, NewError("invalid path", 400)
+	}
+
+	res, err := p.get("listfolder", map[string]string{"path": parent})
+	if err != nil {
+		return nil, err
+	}
+	rawBody, err := io.ReadAll(res.Body)
+	res.Body.Close()
+	if err != nil {
+		return nil, err
+	}
+	contents, result, errMsg, err := parseListfolderBody(rawBody)
+	if err != nil {
+		return nil, err
+	}
+	if result != 0 {
+		return nil, NewError(errMsg, 400)
+	}
+	for _, item := range contents {
+		meta := metaFromMap(item, parent)
+		if meta.Name != name || meta.IsFolder != wantFolder {
+			continue
+		}
+		if meta.Path == "" {
+			meta.Path = remotePath
+		}
+		return meta, nil
+	}
+	return nil, NewError("file not found", 404)
+}
+
+func metaToFileInfo(meta *pcloudMeta) File {
+	fType := "file"
+	if meta.IsFolder {
+		fType = "directory"
+	}
+	return File{
+		FName: meta.Name,
+		FType: fType,
+		FTime: parseModifiedUnix(meta.Modified),
+		FSize: meta.Size,
+	}
+}
+
+func (p PCloud) ensurePath(remotePath string) error {
+	remotePath = normRemotePath(remotePath)
+	if remotePath == "/" {
+		return nil
+	}
+	parts := strings.Split(strings.Trim(remotePath, "/"), "/")
+	cur := ""
+	for _, part := range parts {
+		cur += "/" + part
+		res, err := p.get("listfolder", map[string]string{"path": cur})
+		if err != nil {
+			return err
+		}
+		var r struct {
+			Result int    `json:"result"`
+			Error  string `json:"error"`
+		}
+		json.NewDecoder(res.Body).Decode(&r)
+		res.Body.Close()
+		if r.Result == 0 {
+			continue
+		}
+		res2, err := p.get("createfolder", map[string]string{"path": cur})
+		if err != nil {
+			return err
+		}
+		var r2 struct {
+			Result int    `json:"result"`
+			Error  string `json:"error"`
+		}
+		json.NewDecoder(res2.Body).Decode(&r2)
+		res2.Body.Close()
+		if r2.Result == 0 || r2.Result == 2004 {
+			continue
+		}
+		return NewError(r2.Error, 400)
+	}
+	return nil
+}
+
+func (p PCloud) Ls(path string) ([]os.FileInfo, error) {
+	parentPath := normRemotePath(strings.TrimSuffix(p.pcloudPath(path), "/"))
+	res, err := p.get("listfolder", p.lsParams(path))
+	if err != nil {
+		return nil, err
+	}
+	rawBody, err := io.ReadAll(res.Body)
+	res.Body.Close()
+	if err != nil {
+		return nil, err
+	}
+	contents, result, errMsg, err := parseListfolderBody(rawBody)
+	if err != nil {
+		return nil, err
+	}
+	if result != 0 {
+		return nil, NewError(errMsg, 400)
+	}
+	files := make([]os.FileInfo, 0, len(contents))
+	for _, item := range contents {
+		files = append(files, fileFromMap(item, parentPath))
 	}
 	return files, nil
 }
 
 func (p PCloud) Stat(path string) (os.FileInfo, error) {
-	return nil, ErrNotImplemented
+	meta, err := p.statRemote(p.pcloudPath(path))
+	if err != nil {
+		return nil, err
+	}
+	f := metaToFileInfo(meta)
+	return f, nil
 }
 
 func (p PCloud) Cat(path string) (io.ReadCloser, error) {
-	res, err := p.get("getfilelink", map[string]string{"path": p.pcloudPath(path)})
+	if strings.HasSuffix(strings.TrimSpace(path), "/") {
+		return nil, NewError("is a directory", 400)
+	}
+	meta, err := p.resolveEntry(path)
+	if err != nil {
+		return nil, err
+	}
+	if meta.IsFolder {
+		return nil, NewError("is a directory", 400)
+	}
+	params := map[string]string{}
+	if meta.FileId > 0 {
+		params["fileid"] = strconv.FormatInt(meta.FileId, 10)
+	} else {
+		params["path"] = meta.Path
+	}
+	res, err := p.get("getfilelink", params)
 	if err != nil {
 		return nil, err
 	}
@@ -301,15 +603,154 @@ func (p PCloud) Cat(path string) (io.ReadCloser, error) {
 	if len(r.Hosts) == 0 {
 		return nil, NewError("no download host returned", 500)
 	}
-	dlRes, err := http.Get("https://" + r.Hosts[0] + r.Path)
+	dlURL := "https://" + r.Hosts[0] + r.Path
+	req, err := http.NewRequest("GET", dlURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	dlRes, err := HTTPClient().Do(req)
 	if err != nil {
 		return nil, err
 	}
 	return dlRes.Body, nil
 }
 
+func (p PCloud) apiResult(res *http.Response) (int, string, error) {
+	defer res.Body.Close()
+	var r struct {
+		Result int    `json:"result"`
+		Error  string `json:"error"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&r); err != nil {
+		return 0, "", err
+	}
+	if r.Result != 0 {
+		return r.Result, r.Error, NewError(r.Error, 400)
+	}
+	return 0, "", nil
+}
+
+func (p PCloud) deleteFileEntry(meta *pcloudMeta) error {
+	params := map[string]string{}
+	if meta.FileId > 0 {
+		params["fileid"] = strconv.FormatInt(meta.FileId, 10)
+	} else if meta.Path != "" {
+		params["path"] = meta.Path
+	} else {
+		return NewError("missing file id", 400)
+	}
+	res, err := p.get("deletefile", params)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	var r struct {
+		Result   int    `json:"result"`
+		Error    string `json:"error"`
+		Metadata struct {
+			IsDeleted bool `json:"isdeleted"`
+		} `json:"metadata"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&r); err != nil {
+		return err
+	}
+	if r.Result != 0 {
+		return NewError(r.Error, 400)
+	}
+	return nil
+}
+
+func (p PCloud) deleteFolderEntry(meta *pcloudMeta) error {
+	params := map[string]string{}
+	if meta.FolderId > 0 {
+		params["folderid"] = strconv.FormatInt(meta.FolderId, 10)
+	} else if meta.Path != "" {
+		params["path"] = meta.Path
+	} else {
+		return NewError("missing folder id", 400)
+	}
+	res, err := p.get("deletefolder", params)
+	if err != nil {
+		return err
+	}
+	_, _, err = p.apiResult(res)
+	return err
+}
+
+// trashFolder moves a folder and all contents to the pCloud Trash (deletefile/deletefolder),
+// never deletefolderrecursive which permanently removes data.
+func (p PCloud) trashFolder(remotePath string) error {
+	res, err := p.get("listfolder", map[string]string{"path": remotePath})
+	if err != nil {
+		return err
+	}
+	rawBody, err := io.ReadAll(res.Body)
+	res.Body.Close()
+	if err != nil {
+		return err
+	}
+	contents, result, errMsg, err := parseListfolderBody(rawBody)
+	if err != nil {
+		return err
+	}
+	if result != 0 {
+		return NewError(errMsg, 400)
+	}
+	for _, item := range contents {
+		entry := metaFromMap(item, remotePath)
+		itemPath := entry.Path
+		if itemPath == "" && entry.Name != "" {
+			itemPath = remotePath + "/" + entry.Name
+			entry.Path = normRemotePath(itemPath)
+		}
+		if entry.IsFolder {
+			if err := p.trashFolder(entry.Path); err != nil {
+				return err
+			}
+		} else if err := p.deleteFileEntry(entry); err != nil {
+			return err
+		}
+	}
+	folderMeta, err := p.statRemote(remotePath)
+	if err != nil {
+		return err
+	}
+	return p.deleteFolderEntry(folderMeta)
+}
+
 func (p PCloud) Mkdir(path string) error {
-	res, err := p.get("createfolder", map[string]string{"path": p.pcloudPath(path)})
+	return p.ensurePath(p.pcloudPath(path))
+}
+
+func (p PCloud) Rm(path string) error {
+	meta, err := p.resolveEntry(path)
+	if err != nil {
+		return err
+	}
+	if meta.IsFolder {
+		return p.trashFolder(normRemotePath(strings.TrimSuffix(p.pcloudPath(path), "/")))
+	}
+	return p.deleteFileEntry(meta)
+}
+
+func (p PCloud) Mv(from string, to string) error {
+	fromPath := p.pcloudPath(from)
+	toPath := p.pcloudPath(to)
+	if err := p.ensurePath(pathDir(toPath)); err != nil {
+		return err
+	}
+	meta, err := p.resolveEntry(from)
+	if err != nil {
+		return err
+	}
+	method := "renamefile"
+	if meta.IsFolder {
+		method = "renamefolder"
+	}
+	res, err := p.get(method, map[string]string{
+		"path":   normRemotePath(strings.TrimSuffix(fromPath, "/")),
+		"topath": normRemotePath(strings.TrimSuffix(toPath, "/")),
+	})
 	if err != nil {
 		return err
 	}
@@ -325,86 +766,45 @@ func (p PCloud) Mkdir(path string) error {
 	return nil
 }
 
-func (p PCloud) Rm(path string) error {
-	res, err := p.get("deletefile", map[string]string{"path": p.pcloudPath(path)})
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-	var r struct {
-		Result int    `json:"result"`
-		Error  string `json:"error"`
-	}
-	json.NewDecoder(res.Body).Decode(&r)
-	if r.Result == 0 {
-		return nil
-	}
-	res2, err := p.get("deletefolderrecursive", map[string]string{"path": p.pcloudPath(path)})
-	if err != nil {
-		return err
-	}
-	defer res2.Body.Close()
-	var r2 struct {
-		Result int    `json:"result"`
-		Error  string `json:"error"`
-	}
-	json.NewDecoder(res2.Body).Decode(&r2)
-	if r2.Result != 0 {
-		return NewError(r2.Error, 400)
-	}
-	return nil
-}
-
-func (p PCloud) Mv(from string, to string) error {
-	toDir := filepath.Dir(p.pcloudPath(to))
-	toName := filepath.Base(to)
-	res, err := p.get("renamefile", map[string]string{
-		"path": p.pcloudPath(from), "topath": toDir, "toname": toName,
-	})
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-	var r struct {
-		Result int    `json:"result"`
-		Error  string `json:"error"`
-	}
-	json.NewDecoder(res.Body).Decode(&r)
-	if r.Result == 0 {
-		return nil
-	}
-	res2, err := p.get("renamefolder", map[string]string{
-		"path": p.pcloudPath(from), "topath": toDir, "toname": toName,
-	})
-	if err != nil {
-		return err
-	}
-	defer res2.Body.Close()
-	var r2 struct {
-		Result int    `json:"result"`
-		Error  string `json:"error"`
-	}
-	json.NewDecoder(res2.Body).Decode(&r2)
-	if r2.Result != 0 {
-		return NewError(r2.Error, 400)
-	}
-	return nil
-}
-
 func (p PCloud) Touch(path string) error {
 	return p.Save(path, strings.NewReader(""))
 }
 
 func (p PCloud) Save(path string, file io.Reader) error {
-	q := url.Values{}
-	q.Set("access_token", p.Bearer)
-	q.Set("path", filepath.Dir(p.pcloudPath(path)))
-	q.Set("filename", filepath.Base(path))
-	req, err := http.NewRequest("POST", p.apiURL("uploadfile")+"?"+q.Encode(), file)
+	remotePath := p.pcloudPath(path)
+	parent := pathDir(remotePath)
+	fname := pathBase(remotePath)
+	if fname == "" {
+		return NewError("invalid upload path", 400)
+	}
+	if err := p.ensurePath(parent); err != nil {
+		return err
+	}
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	part, err := mw.CreateFormFile("file", fname)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/octet-stream")
+	if _, err := io.Copy(part, file); err != nil {
+		return err
+	}
+	if err := mw.Close(); err != nil {
+		return err
+	}
+
+	q := url.Values{}
+	q.Set("access_token", p.Bearer)
+	q.Set("filename", fname)
+	rawURL := p.apiURL("uploadfile") + "?" + q.Encode()
+	rawURL += "&" + encodePathParam("path", parent)
+
+	req, err := http.NewRequest("POST", rawURL, &body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
 	resp, err := HTTPClient().Do(req)
 	if err != nil {
 		return err
@@ -419,14 +819,4 @@ func (p PCloud) Save(path string, file io.Reader) error {
 		return NewError(fmt.Sprintf("pCloud upload error %d: %s", r.Result, r.Error), 400)
 	}
 	return nil
-}
-
-func (p PCloud) pcloudPath(path string) string {
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
-	if path != "/" && strings.HasSuffix(path, "/") {
-		path = strings.TrimSuffix(path, "/")
-	}
-	return path
 }

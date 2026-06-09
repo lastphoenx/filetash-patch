@@ -2,165 +2,77 @@
 
 pCloud OAuth 2.0 Integration für Filestash File Manager.
 
+**Aktuelle Version:** 1.1.4
+
 ## Features
 
-- ✅ OAuth 2.0 Authorization Code Flow
-- ✅ Vollständige Dateiverwaltung (CRUD)
-- ✅ Multi-Account Switching (gleichzeitiger Login mehrerer Accounts)
-- ✅ Bearer Token Query-Parameter Authentifizierung
-- ✅ Korrekte Path-Encoding für pCloud API
+- OAuth 2.0 Authorization Code Flow (EU/US API-Host)
+- CRUD: Listen, Upload, Move, Rename, Delete (Papierkorb)
+- Ordner-ZIP-Download über Filestash `api/files/zip`
+- `fileid`-basierte Deletes (Papierkorb, eindeutig bei gleichem Datei-/Ordnernamen)
+- Path-Encoding für pCloud REST (`path` / `topath` ohne `%2F`-Slash-Bug)
+- Optional: `PCLOUD_ROOT_FOLDERID` als Startansicht (kein Pfad-Chroot)
+
+## Abgrenzung zu Samba / anderen Backends
+
+Dieses Plugin ist **`plg_backend_pcloud`** — isoliert vom Filestash-Samba-Plugin (`plg_backend_samba`) und allen anderen Backends. Es werden nur Dateien in diesem Ordner geändert:
+
+- `backend-pcloud-index.go` → Build nach `server/plugin/plg_backend_pcloud/index.go`
+- `docker-compose-pcloud.yml` → Beispiel-Env (ohne `PCLOUD_ROOT_PATH`-Chroot)
+
+`model_files.js` (Move-Patch) ist **Frontend** und verbessert Statusmeldungen für alle Backends (Ordner vs. Datei), ohne Samba-Backend-Code anzufassen.
 
 ## Quick Start
 
-### 1. pCloud OAuth App erstellen
+### 1. pCloud OAuth App
 
-1. Developer Account auf [pcloud.com](https://www.pcloud.com) erstellen
-2. In Developer Console neue OAuth App registrieren
-3. **Wichtig:** App-Folder Restriction DEAKTIVIEREN
-4. Mindestens `/Backup` Ordner-Zugriff konfigurieren
-5. Client ID und Secret erhalten
+1. Developer Account auf [pcloud.com](https://www.pcloud.com)
+2. OAuth App registrieren
+3. **App-Folder Restriction DEAKTIVIEREN**
+4. Redirect URI: `https://<APPLICATION_URL>/login`
+5. Client ID und Secret notieren
 
-### 2. Konfiguration
-
-Kopiere `docker-compose-pcloud.yml` und ersetze die Platzhalter:
-
-```yaml
-PCLOUD_CLIENT_ID=<YOUR_CLIENT_ID>
-PCLOUD_CLIENT_SECRET=<YOUR_CLIENT_SECRET>
-APPLICATION_URL=your-domain.com
-```
-
-### 3. Docker Container starten
+### 2. Build einbinden
 
 ```bash
-docker-compose -f docker-compose-pcloud.yml up -d
+cp backend-pcloud-index.go /root/filestash/server/plugin/plg_backend_pcloud/index.go
+# Optional: model_files.js aus Move-Patch (Ordner/Datei-Meldungen)
+cp model_files.js /root/filestash/public/assets/pages/filespage/
+cd /root/filestash && make build
 ```
 
-## Dateien
-
-- **backend-pcloud-index.go** — pCloud Backend Plugin (v1.0.2)
-- **docker-compose-pcloud.yml** — Docker-Komposition mit pCloud-Konfiguration
-
-## Technische Details
-
-### Bearer Token Authentication
-
-pCloud akzeptiert Access Token als Query-Parameter, nicht als Authorization Header:
-
-```
-https://api.pcloud.com/listfolder?access_token=TOKEN&folderid=0
-```
-
-### Path Encoding
-
-Das Plugin behandelt Pfade speziell, um Slashes korrekt zu handhaben:
-
-```go
-// URL-kodierte Slashes werden konvertiert: %2F → /
-strings.ReplaceAll(url.QueryEscape(pathVal), "%2F", "/")
-```
-
-Dies ist erforderlich, da pCloud die Slashes als Pfad-Trennzeichen interpretiert.
-
-### OAuth Ablauf
-
-1. Benutzer klickt pCloud-Button
-2. Wird zu `https://my.pcloud.com/oauth2/authorize` weitergeleitet
-3. Genehmigt Zugriff
-4. Wird zurück weitergeleitet mit `code` Parameter
-5. Plugin tauscht Code gegen Access Token
-6. Token wird in Browser-Cookies gespeichert
-
-## Implementierte Funktionen
-
-- `Ls(path)` — Dateien/Ordner auflisten
-- `Cat(path)` — Dateiinhalt lesen
-- `Mkdir(path)` — Ordner erstellen
-- `Rm(path)` — Datei/Ordner löschen
-- `Mv(from, to)` — Verschieben/Umbenennen
-- `Touch(path)` — Leere Datei erstellen
-- `Save(path, data)` — Datei hochladen
-
-## Deployment
-
-### Build-Server (ct130)
+### 3. Deploy
 
 ```bash
-# 1. Datei bearbeiten
-nano /root/filestash/server/plugin/plg_backend_pcloud/index.go
-
-# 2. Build erstellen
-cd /root/filestash && make build 2>&1
-
-# 3. Binary transferieren
-scp dist/filestash root@192.168.131.32:/tmp/filestash-new
+scp dist/filestash root@<PROD>:/tmp/filestash-new
+ssh root@<PROD> "docker cp /tmp/filestash-new filestash:/app/filestash && \
+  docker commit filestash filestash-custom:latest && docker restart filestash"
 ```
 
-### Production-Server (ct122)
+## Dateien in diesem Patch
 
-```bash
-# 1. In Docker kopieren
-docker cp /tmp/filestash-new filestash:/app/filestash
+| Datei | Zweck |
+|-------|--------|
+| `backend-pcloud-index.go` | pCloud Backend (v1.1.4) |
+| `docker-compose-pcloud.yml` | Compose-Beispiel mit OAuth-Env |
+| `model_files.js` | UI-Meldungen Ordner vs. Datei (optional, Frontend) |
 
-# 2. Image neu erstellen
-docker commit filestash filestash-custom:latest
+## Versionshistorie
 
-# 3. Container neu starten
-docker restart filestash
+| Version | Inhalt |
+|---------|--------|
+| **1.1.4** | ZIP-Download: `isfolder` robust (0/1/bool/icon), `FTime` Unix-Sekunden, `Cat` via `fileid` |
+| **1.1.3** | Delete via `fileid`; `resolveEntry`; UI-Meldungen Ordner/Datei |
+| **1.1.2** | Kein `PCLOUD_ROOT_PATH`-Chroot — volle pCloud-Root sichtbar |
+| **1.1.1** | Papierkorb: `deletefile`/`deletefolder` + `trashFolder`, kein `deletefolderrecursive` |
+| **1.1.0** | Stat, ensurePath, multipart Upload, sicheres Move/Rm |
+| **1.0.2** | Path-Encoding `%2F` → `/` |
+| **1.0.0** | Initial OAuth |
 
-# Oder mit docker-compose:
-cd /opt/filestash && docker compose down && docker compose up -d
-```
+## Technische Referenz
 
-### Verifizierung
-
-```bash
-# Logs überprüfen
-docker logs filestash | grep pcloud
-
-# Sollte zeigen:
-# pcloud Init: clientId_len=... secret_len=... ...
-# pcloud OAuthToken: SUCCESS token_len=... api_host=...
-```
-
-## Automatisierungs-Script
-
-```bash
-#!/bin/bash
-BUILD_HOST="root@192.168.131.30"
-PROD_HOST="root@192.168.131.32"
-
-# Build
-ssh $BUILD_HOST "cd /root/filestash && make build"
-
-# Transfer & Deploy
-ssh $BUILD_HOST "scp /root/filestash/dist/filestash $PROD_HOST:/tmp/filestash-new"
-ssh $PROD_HOST "docker cp /tmp/filestash-new filestash:/app/filestash && \
-                docker commit filestash filestash-custom:latest && \
-                docker restart filestash"
-
-# Verify
-ssh $PROD_HOST "docker logs filestash | grep pcloud | tail -3"
-```
-
-## Bekannte Einschränkungen
-
-- Dateien sind nur sichtbar, wenn pCloud OAuth-App mit `/Backup` Zugriff konfiguriert ist
-- Token wird in Browser-Cookies gespeichert (nicht persistent über Browser-Restart)
-
-## Vollständige Dokumentation
-
-Siehe private Repository (`/Doku`) für erweiterte Dokumentation:
-- Detaillierte OAuth-Flow Erklärung
-- Versions-Historie (1.0.0 → 1.0.2)
-- Alle Bugfixes und Testings
-- Multi-Account Switching Feature
-- Fehlerbehandlung und Rollback-Strategien
-
-## Version
-
-**v1.0.2** — Path-Encoding Fix für %2F → / Konvertierung
+Design orientiert an `pcloud_bin_lib.py` (Pfad-Normalisierung, Move mit vollem `topath`, multipart Upload). Vollständige Doku, Pipeline und Rollback: privates Repo `doku` → `pve2/vm/122-filestash/README.md`.
 
 ## License
 
-Siehe LICENSE Datei.
+Siehe LICENSE im Repository-Root.
