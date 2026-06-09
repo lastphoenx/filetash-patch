@@ -11,7 +11,7 @@ services:
     - OFFICE_REWRITE_URL=http://127.0.0.1:9980
     - PCLOUD_CLIENT_ID=YOUR_CLIENT_ID_HERE
     - PCLOUD_CLIENT_SECRET=YOUR_CLIENT_SECRET_HERE
-    - PCLOUD_ROOT_PATH=Backup
+    # PCLOUD_ROOT_FOLDERID optional: nur setzen, wenn Filestash auf einen Unterordner beschränkt werden soll
 
     ports:
     - "8334:8334"

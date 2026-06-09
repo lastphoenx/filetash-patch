@@ -13,7 +13,7 @@ Läuft produktiv seit April 2026. **Benutzung auf eigenes Risiko.**
 - **VERSCHIEBEN-Button** – für Einzel- und Mehrfach-Selektion
 - **Ordner-Picker Modal** – mit Breadcrumb-Navigation, responsiv
 - **Tastaturkürzel** – F2 (Rename), Del (Delete), M (Move)
-- **Statusmeldung** – unterscheidet "verschoben" vs. "umbenannt"
+- **Statusmeldung** – unterscheidet „verschoben“ vs. „umbenannt“ sowie **Ordner vs. Datei** (löschen/umbenennen)
 - **Delete-Bestätigung** – Eingabefeld erwartet `remove` statt Dateiname
 - **Modal-Breite** – erhöht auf 600px
 
@@ -34,6 +34,7 @@ git clone https://github.com/mickael-kerjean/filestash.git
 cd filestash && git checkout 272eb29f
 
 # 2. Patch-Dateien kopieren
+cp src/backend-pcloud-index.go /root/filestash/server/plugin/plg_backend_pcloud/index.go  # optional: pCloud
 cp src/*.js public/assets/pages/filespage/
 cp src/modal.css public/assets/components/
 cp src/index.frontoffice.html public/
@@ -60,12 +61,19 @@ ssh root@<HOST> "docker cp /tmp/filestash-new filestash:/app/filestash && docker
 
 ```
 src/
-├── modal_move.js           – Ordner-Picker Modal
-├── ctrl_submenu.js         – VERSCHIEBEN-Button + Handler
-├── model_files.js          – Statusmeldung
-├── modal.css               – Modal-Breite
-└── index.frontoffice.html  – Shortcuts
+├── backend-pcloud-index.go   – pCloud OAuth Backend (v1.1.4)
+├── docker-compose-pcloud.yml – Compose-Beispiel pCloud-Env
+├── PCLOUD_BACKEND.md         – pCloud Plugin Kurzdoku (öffentlich)
+├── modal_move.js             – Ordner-Picker Modal
+├── ctrl_submenu.js           – VERSCHIEBEN-Button + Handler
+├── model_files.js            – Statusmeldung (verschoben/umbenannt; Ordner vs. Datei)
+├── modal.css                 – Modal-Breite
+└── index.frontoffice.html    – Shortcuts
 ```
+
+### pCloud Backend (separates Plugin)
+
+Das pCloud-Plugin ist **unabhängig** von Samba/WebDAV/S3-Backends in Filestash. Siehe [src/PCLOUD_BACKEND.md](src/PCLOUD_BACKEND.md). Private Betriebsdoku (Deploy ct130/ct122, Rollback): Repo `lastphoenx/doku` → `pve2/vm/122-filestash/`.
 
 ---
 

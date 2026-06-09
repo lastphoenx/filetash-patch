@@ -40,6 +40,7 @@ const handleErrorRedirectLogin = rxjs.catchError((err) => {
 });
 
 const trimDirectorySuffix = (name) => name.replace(new RegExp("/$"), "");
+const isDirectoryPath = (path) => String(path).endsWith("/");
 
 export const touch = (path) => ajax({
     url: withURLParams(`api/files/touch?path=${encodeURIComponent(path)}`),
@@ -64,7 +65,13 @@ export const rm = (...paths) => rxjs.forkJoin(paths.map((path) => ajax({
     method: "POST",
     responseType: "json",
 }))).pipe(
-    handleSuccess(paths.length > 1 ? t("All Done!") : t("The file '{{VALUE}}' was deleted", basename(trimDirectorySuffix(paths[0])))),
+    handleSuccess((() => {
+        if (paths.length > 1) return t("All Done!");
+        const name = basename(trimDirectorySuffix(paths[0]));
+        return isDirectoryPath(paths[0])
+            ? t("The folder '{{VALUE}}' was deleted", name)
+            : t("The file '{{VALUE}}' was deleted", name);
+    })()),
     handleError,
 );
 
@@ -72,9 +79,10 @@ export const mv = (from, to) => {
     const fromDir = from.replace(/\/[^\/]*\/?$/, "");
     const toDir = to.replace(/\/[^\/]*\/?$/, "");
     const name = basename(trimDirectorySuffix(from));
+    const isDir = isDirectoryPath(from);
     const msg = fromDir !== toDir
-        ? `'${name}' wurde verschoben`
-        : t("The file '{{VALUE}}' was renamed", name);
+        ? (isDir ? t("The folder '{{VALUE}}' was moved", name) : `'${name}' wurde verschoben`)
+        : (isDir ? t("The folder '{{VALUE}}' was renamed", name) : t("The file '{{VALUE}}' was renamed", name));
     return ajax({
         url: withURLParams(`api/files/mv?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
         method: "POST",
