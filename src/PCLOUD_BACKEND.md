@@ -81,6 +81,68 @@ Dies ist erforderlich, da pCloud die Slashes als Pfad-Trennzeichen interpretiert
 - `Touch(path)` — Leere Datei erstellen
 - `Save(path, data)` — Datei hochladen
 
+## Deployment
+
+### Build-Server (ct130)
+
+```bash
+# 1. Datei bearbeiten
+nano /root/filestash/server/plugin/plg_backend_pcloud/index.go
+
+# 2. Build erstellen
+cd /root/filestash && make build 2>&1
+
+# 3. Binary transferieren
+scp dist/filestash root@192.168.131.32:/tmp/filestash-new
+```
+
+### Production-Server (ct122)
+
+```bash
+# 1. In Docker kopieren
+docker cp /tmp/filestash-new filestash:/app/filestash
+
+# 2. Image neu erstellen
+docker commit filestash filestash-custom:latest
+
+# 3. Container neu starten
+docker restart filestash
+
+# Oder mit docker-compose:
+cd /opt/filestash && docker compose down && docker compose up -d
+```
+
+### Verifizierung
+
+```bash
+# Logs überprüfen
+docker logs filestash | grep pcloud
+
+# Sollte zeigen:
+# pcloud Init: clientId_len=... secret_len=... ...
+# pcloud OAuthToken: SUCCESS token_len=... api_host=...
+```
+
+## Automatisierungs-Script
+
+```bash
+#!/bin/bash
+BUILD_HOST="root@192.168.131.30"
+PROD_HOST="root@192.168.131.32"
+
+# Build
+ssh $BUILD_HOST "cd /root/filestash && make build"
+
+# Transfer & Deploy
+ssh $BUILD_HOST "scp /root/filestash/dist/filestash $PROD_HOST:/tmp/filestash-new"
+ssh $PROD_HOST "docker cp /tmp/filestash-new filestash:/app/filestash && \
+                docker commit filestash filestash-custom:latest && \
+                docker restart filestash"
+
+# Verify
+ssh $PROD_HOST "docker logs filestash | grep pcloud | tail -3"
+```
+
 ## Bekannte Einschränkungen
 
 - Dateien sind nur sichtbar, wenn pCloud OAuth-App mit `/Backup` Zugriff konfiguriert ist
@@ -88,11 +150,12 @@ Dies ist erforderlich, da pCloud die Slashes als Pfad-Trennzeichen interpretiert
 
 ## Vollständige Dokumentation
 
-Siehe `/doku` private Repository für erweiterte Dokumentation:
+Siehe private Repository (`/Doku`) für erweiterte Dokumentation:
 - Detaillierte OAuth-Flow Erklärung
 - Versions-Historie (1.0.0 → 1.0.2)
 - Alle Bugfixes und Testings
 - Multi-Account Switching Feature
+- Fehlerbehandlung und Rollback-Strategien
 
 ## Version
 
